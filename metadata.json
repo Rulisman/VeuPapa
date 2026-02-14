@@ -1,0 +1,7 @@
+{
+  "name": "VozViva - Amplificador Comunicativo",
+  "description": "Aplicación de accesibilidad médica para personas con voz débil o quirúrgica, utilizando IA de Google para amplificar y clarificar la comunicación.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
