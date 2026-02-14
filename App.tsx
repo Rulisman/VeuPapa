@@ -92,46 +92,81 @@ const App: React.FC = () => {
   };
 
   const speak = async (text: string) => {
+
     setStatus(AppStatus.SPEAKING);
+
+    
+
     try {
+
       if (!audioContextRef.current) {
+
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+
       }
+
+      
+
       const ctx = audioContextRef.current;
-      const isMale = settings.voiceGender === VoiceGender.MALE;
-      const voiceName = isMale ? 'Puck' : 'Kore';
-      const pitch = isMale ? -6.0 : 0;
-      const rate = isMale ? 0.85 : 1.0;
 
-      const base64Audio = await synthesizeSpeech(text, voiceName, pitch, rate);
+      const voiceName = settings.voiceGender === VoiceGender.FEMALE ? 'Kore' : 'Puck';
+
+      const base64Audio = await synthesizeSpeech(text, voiceName);
+
+      
+
       if (base64Audio) {
-        const audioBuffer = await decodeAudioData(decodeBase64(base64Audio), ctx);
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        const gainNode = ctx.createGain();
-        gainNode.gain.value = settings.volume;
-        source.connect(gainNode);
-        gainNode.connect(ctx.destination);
-        source.onended = () => {
-          setTimeout(() => {
-            isProcessingRef.current = false;
-            if (statusRef.current !== AppStatus.IDLE) {
-              setStatus(AppStatus.LISTENING);
-              try { recognitionRef.current?.start(); } catch (e) {}
-            }
-          }, 1000);
-        };
-        source.start(0);
-      } else {
-        isProcessingRef.current = false;
-        setStatus(AppStatus.LISTENING);
-      }
-    } catch (e) {
-      isProcessingRef.current = false;
-      setStatus(AppStatus.IDLE);
-    }
-  };
 
+        const audioBytes = decodeBase64(base64Audio);
+
+        const audioBuffer = await decodeAudioData(audioBytes, ctx);
+
+        
+
+        const source = ctx.createBufferSource();
+
+        source.buffer = audioBuffer;
+
+        
+
+        const gainNode = ctx.createGain();
+
+        gainNode.gain.value = settings.volume;
+
+        
+
+        source.connect(gainNode);
+
+        gainNode.connect(ctx.destination);
+
+        
+
+        source.onended = () => {
+
+          setStatus(AppStatus.LISTENING);
+
+        };
+
+        
+
+        source.start(0);
+
+      } else {
+
+        setStatus(AppStatus.LISTENING);
+
+      }
+
+    } catch (error) {
+
+      console.error("Speech error", error);
+
+      setStatus(AppStatus.IDLE);
+
+    }
+
+  };
+  
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 text-white font-sans">
       <header className="p-6 border-b border-slate-800 flex justify-between items-center">
