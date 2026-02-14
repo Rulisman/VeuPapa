@@ -130,50 +130,68 @@ const App: React.FC = () => {
   };
 
   const speak = async (text: string) => {
-    setStatus(AppStatus.SPEAKING);
-    
-    try {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      }
-      
-      const ctx = audioContextRef.current;
-      const voiceName = settings.voiceGender === VoiceGender.FEMALE ? 'Kore' : 'Puck';
-      const base64Audio = await synthesizeSpeech(text, voiceName);
-      
-      if (base64Audio) {
-        const audioBytes = decodeBase64(base64Audio);
-        const audioBuffer = await decodeAudioData(audioBytes, ctx);
-        const source = ctx.createBufferSource();
-        source.buffer = audioBuffer;
-        
-        const gainNode = ctx.createGain();
-        gainNode.gain.value = settings.volume;
-        source.connect(gainNode);
-        gainNode.connect(ctx.destination);
-        
-        source.onended = () => {
-          // SEGURO 4: "Cool-down" de 1 segundo para evitar capturar ecos residuales
-          setTimeout(() => {
-            isProcessingRef.current = false;
-            if (statusRef.current !== AppStatus.IDLE) {
-              setStatus(AppStatus.LISTENING);
-              try { recognitionRef.current?.start(); } catch (e) {}
-            }
-          }, 1000); 
-        };
-        
-        source.start(0);
-      } else {
-        isProcessingRef.current = false;
-        setStatus(AppStatus.LISTENING);
-        recognitionRef.current?.start();
-      }
-    } catch (error) {
-      isProcessingRef.current = false;
-      setStatus(AppStatus.IDLE);
+  setStatus(AppStatus.SPEAKING);
+  
+  try {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     }
-  };
+    
+    const ctx = audioContextRef.current;
+
+    // --- CONFIGURACIÓN VOZ DE ANCIANO ---
+    const isMale = settings.voiceGender === VoiceGender.MALE;
+    const voiceName = isMale ? 'Puck' : 'Kore';
+    
+    // Si es hombre, bajamos el tono (-6.0) y la velocidad (0.85) para el efecto de 80 años
+    const pitch = isMale ? -6.0 : 0; 
+    const speakingRate = isMale ? 0.85 : 1.0;
+
+    // Llamamos al servicio con los nuevos parámetros de personalización
+    const base64Audio = await synthesizeSpeech(text, voiceName, pitch, speakingRate);
+    
+    if (base64Audio) {
+      const audioBytes = decodeBase64(base64Audio);
+      const audioBuffer = await decodeAudioData(audioBytes, ctx);
+      
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = settings.volume;
+      
+      source.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      
+      source.onended = () => {
+        // --- SEGURO ANTI-BUCLE ---
+        // Esperamos 1 segundo de silencio tras hablar antes de volver a escuchar
+        setTimeout(() => {
+          isProcessingRef.current = false; // Liberamos el bloqueo de procesamiento
+          
+          if (statusRef.current !== AppStatus.IDLE) {
+            setStatus(AppStatus.LISTENING);
+            try {
+              recognitionRef.current?.start();
+            } catch (e) {
+              console.log("El micrófono ya estaba activo");
+            }
+          }
+        }, 1000);
+      };
+      
+      source.start(0);
+    } else {
+      isProcessingRef.current = false;
+      setStatus(AppStatus.LISTENING);
+      recognitionRef.current?.start();
+    }
+  } catch (error) {
+    console.error("Speech error", error);
+    isProcessingRef.current = false;
+    setStatus(AppStatus.IDLE);
+  }
+};
 
   const toggleListening = () => {
     if (status === AppStatus.IDLE) {
