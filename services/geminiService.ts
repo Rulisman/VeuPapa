@@ -1,73 +1,89 @@
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 
-// Usamos el nombre de la variable configurado en su vite.config.ts
-const ai = new GoogleGenAI(process.env.GEMINI_API_KEY || '');
 
-/**
- * Corrige errores de transcripción manteniendo la semántica original.
- */
+
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+
+
+
 export const correctTranscription = async (text: string): Promise<string> => {
+
   if (!text || text.length < 3) return text;
 
+
+
   try {
-    const model = ai.getGenerativeModel({ 
-      model: 'gemini-1.5-flash', // Usamos la versión estable disponible en 2026
-    });
 
-    const prompt = `Actúa como un corrector ortotipográfico especializado en transcripciones de voz débil. 
-    Corrige únicamente errores claros de reconocimiento manteniendo literalmente la intención y las palabras originales. 
-    No añadas introducciones ni comentarios.
-    Texto a corregir: "${text}"`;
+    const response = await ai.models.generateContent({
 
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
+      model: 'gemini-3-flash-preview',
+
+      contents: `Corrige únicamente errores claros de reconocimiento manteniendo literalmente la intención y las palabras originales. No añadas ni elimines información. Texto: "${text}"`,
+
+      config: {
+
         temperature: 0.1,
-        topP: 0.95,
+
+        topP: 1,
+
       },
+
     });
+
     
-    return result.response.text().trim() || text;
+
+    return response.text?.trim() || text;
+
   } catch (error) {
+
     console.error("Gemini Correction Error:", error);
+
     return text;
+
   }
+
 };
 
-/**
- * Sintetiza voz con parámetros ajustables para tono y velocidad.
- * Para un señor de 80 años: voiceName='Puck', pitch=-6.0, speakingRate=0.85
- */
-export const synthesizeSpeech = async (
-  text: string, 
-  voiceName: string = 'Kore',
-  pitch: number = 0,
-  speakingRate: number = 1.0
-): Promise<string | undefined> => {
+
+
+export const synthesizeSpeech = async (text: string, voiceName: string = 'Kore'): Promise<string | undefined> => {
+
   try {
-    const model = ai.getGenerativeModel({ 
-      model: "gemini-1.5-flash" // El modelo Flash soporta modalidades de audio
-    });
 
-    const response = await model.generateContent({
+    const response = await ai.models.generateContent({
+
+      model: "gemini-2.5-flash-preview-tts",
+
       contents: [{ parts: [{ text }] }],
-      generationConfig: {
-        responseModalities: ["AUDIO" as Modality], // Forzamos salida de audio
+
+      config: {
+
+        responseModalities: [Modality.AUDIO],
+
         speechConfig: {
+
           voiceConfig: {
-            prebuiltVoiceConfig: { 
-              voiceName // 'Puck' para masculino, 'Kore' para femenino
-            },
+
+            prebuiltVoiceConfig: { voiceName },
+
           },
+
         },
+
       },
+
     });
 
-    // Nota: Si usas la versión más reciente del SDK, estos parámetros se inyectan 
-    // en la configuración de la respuesta de audio.
-    return response.response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+
+
+    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+
   } catch (error) {
+
     console.error("TTS Error:", error);
+
     return undefined;
+
   }
+
 };
