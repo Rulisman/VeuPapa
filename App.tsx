@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppStatus, TranscriptionResult, VoiceGender, AppSettings } from './types';
 import { correctTranscription, synthesizeSpeech } from './services/geminiService';
 
-// Helper para decodificar audio base64
 const decodeBase64 = (base64: string) => {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
@@ -55,17 +54,20 @@ const App: React.FC = () => {
     }
     const recognition = new (window as any).webkitSpeechRecognition();
     recognition.lang = 'es-ES';
-    recognition.continuous = true;
+    
+    // CAMBIO CLAVE 1: continuous false hace que onresult salte MUCHO más rápido
+    recognition.continuous = false; 
     recognition.interimResults = false;
     
-    recognition.onstart = () => setStatus(AppStatus.LISTENING);
+    recognition.onstart = () => {
+      setStatus(AppStatus.LISTENING);
+      isProcessingRef.current = false;
+    };
     
     recognition.onresult = (event: any) => {
-      if (isProcessingRef.current || statusRef.current !== AppStatus.LISTENING) return;
-      let finalTranscript = '';
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
-      }
+      if (isProcessingRef.current) return;
+      
+      const finalTranscript = event.results[0][0].transcript;
       if (finalTranscript.trim()) {
         isProcessingRef.current = true;
         processFinalText(finalTranscript.trim());
@@ -73,6 +75,7 @@ const App: React.FC = () => {
     };
 
     recognition.onend = () => {
+      // Si el micro se apaga (porque continuous es false) y no estamos procesando nada, reiniciamos
       if (statusRef.current === AppStatus.LISTENING && !isProcessingRef.current) {
         try { recognition.start(); } catch (e) {}
       }
@@ -81,12 +84,21 @@ const App: React.FC = () => {
   }, []);
 
   const processFinalText = async (text: string) => {
+    // Abortamos cualquier escucha residual
     if (recognitionRef.current) recognitionRef.current.abort();
+    
     setStatus(AppStatus.PROCESSING);
+    
     let processedText = text;
+    // La corrección de Gemini tarda ~1-2 segundos
     if (settings.useGeminiCorrection) {
-      processedText = await correctTranscription(text);
+      try {
+        processedText = await correctTranscription(text);
+      } catch (e) {
+        console.error("Error en corrección, usando original");
+      }
     }
+    
     setLastTranscription({ original: text, corrected: processedText, timestamp: Date.now() });
     await speak(processedText);
   };
@@ -99,11 +111,15 @@ const App: React.FC = () => {
       }
       const ctx = audioContextRef.current;
       const isMale = settings.voiceGender === VoiceGender.MALE;
-      const voiceName = isMale ? 'Puck' : 'Kore';
-      const pitch = isMale ? -6.0 : 0;
-      const rate = isMale ? 0.85 : 1.0;
+      
+      // Llamada al TTS (Suele tardar ~1.5 segundos)
+      const base64Audio = await synthesizeSpeech(
+        text, 
+        isMale ? 'Puck' : 'Kore', 
+        isMale ? -6.0 : 0, 
+        isMale ? 0.85 : 1.0
+      );
 
-      const base64Audio = await synthesizeSpeech(text, voiceName, pitch, rate);
       if (base64Audio) {
         const audioBuffer = await decodeAudioData(decodeBase64(base64Audio), ctx);
         const source = ctx.createBufferSource();
@@ -112,57 +128,70 @@ const App: React.FC = () => {
         gainNode.gain.value = settings.volume;
         source.connect(gainNode);
         gainNode.connect(ctx.destination);
+        
         source.onended = () => {
+          // Espera de 1 segundo para evitar que se escuche a sí mismo
           setTimeout(() => {
             isProcessingRef.current = false;
             if (statusRef.current !== AppStatus.IDLE) {
               setStatus(AppStatus.LISTENING);
               try { recognitionRef.current?.start(); } catch (e) {}
             }
-          }, 1000);
+          }, 800);
         };
         source.start(0);
       } else {
-        isProcessingRef.current = false;
-        setStatus(AppStatus.LISTENING);
+        throw new Error("Sin audio");
       }
     } catch (e) {
       isProcessingRef.current = false;
-      setStatus(AppStatus.IDLE);
+      setStatus(AppStatus.LISTENING);
+      try { recognitionRef.current?.start(); } catch (e) {}
     }
   };
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-slate-900 text-white font-sans">
       <header className="p-6 border-b border-slate-800 flex justify-between items-center">
-        <h1 className="text-xl font-bold text-blue-400">VozViva AI</h1>
+        <div>
+          <h1 className="text-xl font-bold text-blue-400">VozViva AI</h1>
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest">Modo Alta Velocidad</p>
+        </div>
         <button 
           onClick={() => setSettings(s => ({...s, voiceGender: s.voiceGender === VoiceGender.MALE ? VoiceGender.FEMALE : VoiceGender.MALE}))}
-          className="p-2 rounded-full bg-slate-800"
+          className="p-2 px-4 rounded-full bg-slate-800 text-sm border border-slate-700 active:bg-slate-700"
         >
-          {settings.voiceGender === VoiceGender.MALE ? '👴 Voz: Abuelo' : '👩 Voz: Mujer'}
+          {settings.voiceGender === VoiceGender.MALE ? '👴 Abuelo' : '👩 Mujer'}
         </button>
       </header>
       
       <main className="flex-1 p-6 flex flex-col justify-center">
-        <div className={`w-32 h-32 rounded-full mx-auto mb-10 border-4 transition-all duration-500 ${
-          status === AppStatus.LISTENING ? 'border-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.5)] scale-110' :
-          status === AppStatus.SPEAKING ? 'border-green-500 shadow-[0_0_30px_rgba(34,197,94,0.5)]' :
-          'border-slate-700'
+        <div className={`w-32 h-32 rounded-full mx-auto mb-10 border-4 transition-all duration-300 flex items-center justify-center ${
+          status === AppStatus.LISTENING ? 'border-blue-500 shadow-[0_0_40px_rgba(59,130,246,0.4)]' :
+          status === AppStatus.PROCESSING ? 'border-amber-500 animate-pulse' :
+          status === AppStatus.SPEAKING ? 'border-green-500 shadow-[0_0_40px_rgba(34,197,94,0.4)]' :
+          'border-slate-800'
         }`}>
-          <div className="w-full h-full flex items-center justify-center">
-            <i className={`fa-solid ${status === AppStatus.LISTENING ? 'fa-microphone' : 'fa-wave-square'} text-4xl`}></i>
-          </div>
+            <i className={`fa-solid ${
+                status === AppStatus.LISTENING ? 'fa-microphone text-blue-400' : 
+                status === AppStatus.PROCESSING ? 'fa-spinner fa-spin text-amber-400' :
+                'fa-wave-square text-green-400'
+            } text-4xl`}></i>
         </div>
 
-        <div className="bg-slate-800/50 p-4 rounded-xl min-h-[150px]">
+        <div className="bg-slate-800/40 border border-slate-800 p-5 rounded-2xl min-h-[160px] backdrop-blur-sm">
           {lastTranscription ? (
-            <>
-              <p className="text-slate-400 text-sm mb-2">Original: {lastTranscription.original}</p>
-              <p className="text-xl font-medium">{lastTranscription.corrected}</p>
-            </>
+            <div className="animate-in fade-in duration-500">
+              <p className="text-slate-500 text-[10px] uppercase font-bold mb-1">Entrada detectada</p>
+              <p className="text-slate-300 italic mb-4 text-sm">"{lastTranscription.original}"</p>
+              <p className="text-slate-500 text-[10px] uppercase font-bold mb-1">Voz Clarificada</p>
+              <p className="text-lg font-semibold text-white leading-tight">{lastTranscription.corrected}</p>
+            </div>
           ) : (
-            <p className="text-slate-500 text-center mt-10">Pulsa el botón y empieza a susurrar</p>
+            <div className="flex flex-col items-center justify-center h-full opacity-30">
+              <i className="fa-solid fa-comment-slash text-2xl mb-2"></i>
+              <p className="text-xs">Sin actividad reciente</p>
+            </div>
           )}
         </div>
       </main>
@@ -179,11 +208,11 @@ const App: React.FC = () => {
               setStatus(AppStatus.IDLE);
             }
           }}
-          className={`w-full py-4 rounded-2xl font-bold text-lg ${
-            status === AppStatus.IDLE ? 'bg-blue-600' : 'bg-rose-600'
+          className={`w-full py-5 rounded-3xl font-black text-xl transition-all active:scale-95 ${
+            status === AppStatus.IDLE ? 'bg-blue-600 shadow-lg shadow-blue-900/20' : 'bg-rose-600'
           }`}
         >
-          {status === AppStatus.IDLE ? 'COMENZAR' : 'DETENER'}
+          {status === AppStatus.IDLE ? 'ACTIVAR' : 'DETENER'}
         </button>
       </footer>
     </div>
