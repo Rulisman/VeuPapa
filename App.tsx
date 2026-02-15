@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AppStatus, TranscriptionResult, VoiceGender, AppSettings } from './types';
 import { correctTranscription, synthesizeSpeech } from './services/geminiService';
 
+// Helper para decodificar audio base64
 const decodeBase64 = (base64: string) => {
   const binaryString = atob(base64);
   const bytes = new Uint8Array(binaryString.length);
@@ -11,12 +12,20 @@ const decodeBase64 = (base64: string) => {
   return bytes;
 };
 
-async function decodeAudioData(data: Uint8Array, ctx: AudioContext): Promise<AudioBuffer> {
+async function decodeAudioData(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number = 24000,
+  numChannels: number = 1,
+): Promise<AudioBuffer> {
   const dataInt16 = new Int16Array(data.buffer);
-  const buffer = ctx.createBuffer(1, dataInt16.length, 24000);
-  const channelData = buffer.getChannelData(0);
-  for (let i = 0; i < dataInt16.length; i++) {
-    channelData[i] = dataInt16[i] / 32768.0;
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
+    }
   }
   return buffer;
 }
@@ -35,77 +44,49 @@ const App: React.FC = () => {
   const statusRef = useRef<AppStatus>(AppStatus.IDLE);
   const isProcessingRef = useRef<boolean>(false);
 
-  // Sincronización crucial del estado
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
 
-  const stopMicrophone = () => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.onend = null; // Evitamos disparos accidentales
-        recognitionRef.current.abort();
-      } catch (e) { console.log("Error al parar:", e); }
-    }
-  };
-
-  const startMicrophone = () => {
-    if (statusRef.current === AppStatus.IDLE) return;
-    
-    // Si ya existe, lo limpiamos antes de crear uno nuevo para evitar bloqueos
-    stopMicrophone();
-    initRecognition(); 
-    
-    try {
-      recognitionRef.current.start();
-    } catch (e) {
-      console.log("Error al iniciar micro, reintentando...");
-      setTimeout(() => recognitionRef.current?.start(), 300);
-    }
-  };
-
   const initRecognition = useCallback(() => {
+    if (!('webkitSpeechRecognition' in window)) {
+      alert("Navegador no soportado.");
+      return;
+    }
     const recognition = new (window as any).webkitSpeechRecognition();
     recognition.lang = 'es-ES';
-    recognition.continuous = false; // Cambiado a false para mayor estabilidad en ciclos
+    recognition.continuous = true;
     recognition.interimResults = false;
     
-    recognition.onstart = () => {
-      setStatus(AppStatus.LISTENING);
-      isProcessingRef.current = false;
-    };
-
+    recognition.onstart = () => setStatus(AppStatus.LISTENING);
+    
     recognition.onresult = (event: any) => {
-      if (isProcessingRef.current) return;
-
-      const text = event.results[0][0].transcript;
-      if (text.trim()) {
+      if (isProcessingRef.current || statusRef.current !== AppStatus.LISTENING) return;
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+      }
+      if (finalTranscript.trim()) {
         isProcessingRef.current = true;
-        processFinalText(text.trim());
+        processFinalText(finalTranscript.trim());
       }
     };
 
     recognition.onend = () => {
-      // Si el micro se apaga solo y no estamos procesando nada, lo reiniciamos
       if (statusRef.current === AppStatus.LISTENING && !isProcessingRef.current) {
-        startMicrophone();
+        try { recognition.start(); } catch (e) {}
       }
     };
-
     recognitionRef.current = recognition;
   }, []);
 
   const processFinalText = async (text: string) => {
-    stopMicrophone(); // Apagamos micro mientras la IA "piensa"
+    if (recognitionRef.current) recognitionRef.current.abort();
     setStatus(AppStatus.PROCESSING);
-    
     let processedText = text;
-    try {
-      if (settings.useGeminiCorrection) {
-        processedText = await correctTranscription(text);
-      }
-    } catch (e) { console.error(e); }
-
+    if (settings.useGeminiCorrection) {
+      processedText = await correctTranscription(text);
+    }
     setLastTranscription({ original: text, corrected: processedText, timestamp: Date.now() });
     await speak(processedText);
   };
@@ -116,44 +97,38 @@ const App: React.FC = () => {
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
-      
+      const ctx = audioContextRef.current;
       const isMale = settings.voiceGender === VoiceGender.MALE;
-      const base64Audio = await synthesizeSpeech(
-        text, 
-        isMale ? 'Puck' : 'Kore', 
-        isMale ? -6.0 : 0, 
-        isMale ? 0.85 : 1.0
-      );
+      const voiceName = isMale ? 'Puck' : 'Kore';
+      const pitch = isMale ? -6.0 : 0;
+      const rate = isMale ? 0.85 : 1.0;
 
+      const base64Audio = await synthesizeSpeech(text, voiceName, pitch, rate);
       if (base64Audio) {
-        const ctx = audioContextRef.current;
         const audioBuffer = await decodeAudioData(decodeBase64(base64Audio), ctx);
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
-        
         const gainNode = ctx.createGain();
         gainNode.gain.value = settings.volume;
         source.connect(gainNode);
         gainNode.connect(ctx.destination);
-        
         source.onended = () => {
-          // CLAVE: Esperar a que el sonido se disipe antes de volver a escuchar
           setTimeout(() => {
             isProcessingRef.current = false;
             if (statusRef.current !== AppStatus.IDLE) {
-              startMicrophone();
+              setStatus(AppStatus.LISTENING);
+              try { recognitionRef.current?.start(); } catch (e) {}
             }
-          }, 800);
+          }, 1000);
         };
         source.start(0);
       } else {
-        throw new Error("No audio data");
+        isProcessingRef.current = false;
+        setStatus(AppStatus.LISTENING);
       }
     } catch (e) {
-      console.error(e);
       isProcessingRef.current = false;
-      setStatus(AppStatus.LISTENING);
-      startMicrophone();
+      setStatus(AppStatus.IDLE);
     }
   };
 
@@ -163,37 +138,31 @@ const App: React.FC = () => {
         <h1 className="text-xl font-bold text-blue-400">VozViva AI</h1>
         <button 
           onClick={() => setSettings(s => ({...s, voiceGender: s.voiceGender === VoiceGender.MALE ? VoiceGender.FEMALE : VoiceGender.MALE}))}
-          className="px-4 py-2 rounded-full bg-slate-800 text-sm"
+          className="p-2 rounded-full bg-slate-800"
         >
-          {settings.voiceGender === VoiceGender.MALE ? '👴 Abuelo (80)' : '👩 Mujer'}
+          {settings.voiceGender === VoiceGender.MALE ? '👴 Voz: Abuelo' : '👩 Voz: Mujer'}
         </button>
       </header>
       
-      <main className="flex-1 p-6 flex flex-col items-center">
-        <div className={`w-32 h-32 rounded-full mb-10 border-4 flex items-center justify-center transition-all duration-500 ${
-          status === AppStatus.LISTENING ? 'border-blue-500 shadow-[0_0_40px_rgba(59,130,246,0.6)] animate-pulse' :
-          status === AppStatus.SPEAKING ? 'border-green-500 shadow-[0_0_40px_rgba(34,197,94,0.6)]' :
+      <main className="flex-1 p-6 flex flex-col justify-center">
+        <div className={`w-32 h-32 rounded-full mx-auto mb-10 border-4 transition-all duration-500 ${
+          status === AppStatus.LISTENING ? 'border-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.5)] scale-110' :
+          status === AppStatus.SPEAKING ? 'border-green-500 shadow-[0_0_30px_rgba(34,197,94,0.5)]' :
           'border-slate-700'
         }`}>
-          <i className={`fa-solid ${status === AppStatus.LISTENING ? 'fa-microphone' : 'fa-volume-high'} text-4xl`}></i>
+          <div className="w-full h-full flex items-center justify-center">
+            <i className={`fa-solid ${status === AppStatus.LISTENING ? 'fa-microphone' : 'fa-wave-square'} text-4xl`}></i>
+          </div>
         </div>
 
-        <div className="w-full bg-slate-800/80 p-5 rounded-2xl min-h-[200px] border border-slate-700">
-          {status === AppStatus.PROCESSING ? (
-            <p className="text-blue-300 animate-pulse text-center mt-12">La IA está aclarando tu voz...</p>
-          ) : lastTranscription ? (
-            <div className="space-y-4">
-              <div>
-                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-tighter">Susurro detectado</span>
-                <p className="text-slate-300 italic">"{lastTranscription.original}"</p>
-              </div>
-              <div className="pt-2 border-t border-slate-700">
-                <span className="text-[10px] text-green-500 uppercase font-bold tracking-tighter">Voz amplificada</span>
-                <p className="text-xl font-semibold text-white">{lastTranscription.corrected}</p>
-              </div>
-            </div>
+        <div className="bg-slate-800/50 p-4 rounded-xl min-h-[150px]">
+          {lastTranscription ? (
+            <>
+              <p className="text-slate-400 text-sm mb-2">Original: {lastTranscription.original}</p>
+              <p className="text-xl font-medium">{lastTranscription.corrected}</p>
+            </>
           ) : (
-            <p className="text-slate-500 text-center mt-12">Pulsa el botón y habla.<br/>La IA te repetirá con fuerza.</p>
+            <p className="text-slate-500 text-center mt-10">Pulsa el botón y empieza a susurrar</p>
           )}
         </div>
       </main>
@@ -202,17 +171,19 @@ const App: React.FC = () => {
         <button
           onClick={() => {
             if (status === AppStatus.IDLE) {
-              startMicrophone();
+              if (!recognitionRef.current) initRecognition();
+              recognitionRef.current.start();
             } else {
+              isProcessingRef.current = false;
+              recognitionRef.current?.abort();
               setStatus(AppStatus.IDLE);
-              stopMicrophone();
             }
           }}
-          className={`w-full py-5 rounded-3xl font-black text-xl tracking-tight transition-all active:scale-95 ${
-            status === AppStatus.IDLE ? 'bg-blue-600 shadow-blue-900/40' : 'bg-rose-600'
-          } shadow-xl`}
+          className={`w-full py-4 rounded-2xl font-bold text-lg ${
+            status === AppStatus.IDLE ? 'bg-blue-600' : 'bg-rose-600'
+          }`}
         >
-          {status === AppStatus.IDLE ? 'ACTIVAR AMPLIFICADOR' : 'DESACTIVAR'}
+          {status === AppStatus.IDLE ? 'COMENZAR' : 'DETENER'}
         </button>
       </footer>
     </div>
